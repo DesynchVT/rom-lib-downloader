@@ -1,0 +1,12 @@
+[package]
+name = "rom_lib_downloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "1.0.228"
+serde_json = "1.0.150"
+dotenv = "0.15.0"
+ssh2 = "0.9.5"
+indicatif = "0.18.4"
+zip = "8.6.0"
