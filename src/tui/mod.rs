@@ -30,17 +30,24 @@ struct AppState {
     mode: AppMode,
 }
 
-pub fn main() -> color_eyre::Result<()> {
+pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    ratatui::run(app)?;
+    ratatui::run(|terminal| app(terminal, sess, consoles_list))?;
     ratatui::restore();
 
     Ok(())
 }
 
-fn app(terminal: &mut DefaultTerminal) -> color_eyre::Result<()> {
-    let mut app_state = AppState::default();
+fn app(
+    terminal: &mut DefaultTerminal,
+    sess: &ssh2::Session,
+    consoles_list: Vec<String>,
+) -> color_eyre::Result<()> {
+    let mut app_state = AppState {
+        consoles_list,
+        ..Default::default()
+    };
     loop {
         terminal.draw(|frame| render(frame, &mut app_state))?;
 
@@ -56,14 +63,6 @@ fn app(terminal: &mut DefaultTerminal) -> color_eyre::Result<()> {
 }
 
 fn render(frame: &mut Frame, app_state: &mut AppState) {
-    let consoles = vec![
-        ListItem::new("wii"),
-        ListItem::new("nds"),
-        ListItem::new("n64"),
-        ListItem::new("psx"),
-        ListItem::new("ps2"),
-        ListItem::new("psp"),
-    ];
     let roms = vec![
         ListItem::new("Crash 1"),
         ListItem::new("Spyro Dragon"),
@@ -85,7 +84,7 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         .split(base_layout[0]);
 
     frame.render_stateful_widget(
-        List::new(consoles.clone())
+        List::new(app_state.consoles_list.clone())
             .block(
                 Block::default()
                     .title_top(Line::from(" CONSOLES ").centered().bold())
@@ -94,22 +93,12 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
             .bold()
             .fg(Color::Blue)
             .highlight_symbol("> ")
-            .highlight_style(Style::default().fg(Color::White)),
-        //.highlight_style(Modifier::REVERSED),
+            //    .highlight_style(Style::default().fg(Color::White)),
+            .highlight_style(Modifier::REVERSED),
         outer_layout[0],
         &mut app_state.highlighted_console,
     );
 
-    // frame.render_widget(
-    //     Paragraph::new("wii\npsx\netc").block(
-    //         Block::new()
-    //             .title_top(Line::from(" CONSOLES ").centered())
-    //             .bold()
-    //             .fg(Color::Blue)
-    //             .borders(Borders::ALL),
-    //     ),
-    //     outer_layout[0],
-    // );
     frame.render_widget(
         Paragraph::new("None").block(
             Block::new()

@@ -93,39 +93,32 @@ pub fn ssh_download(sess: &ssh2::Session, console: &str, rom: &str) {
     remote_file.wait_close().unwrap();
 }
 
-pub fn list_consoles(sess: &ssh2::Session) -> Vec<String> {
+fn do_ls(sess: &ssh2::Session, console: Option<String>) -> Vec<String> {
     let remote_root_path =
         dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
 
+    let target_dir = if let Some(c) = console {
+        &format!("{}/{}", &remote_root_path, c)
+    } else {
+        &remote_root_path
+    };
+
     let mut channel = sess.channel_session().unwrap();
 
-    let cmd = format!("ls {}", remote_root_path);
+    let cmd = format!("ls {}", target_dir);
     channel.exec(&cmd).unwrap();
 
-    let mut consoles_str = String::new();
-    channel.read_to_string(&mut consoles_str).unwrap();
+    let mut dir_list_str = String::new();
+    channel.read_to_string(&mut dir_list_str).unwrap();
     channel.wait_close().unwrap();
+    let list: Vec<String> = dir_list_str.lines().map(String::from).collect();
+    list
+}
 
-    let consoles_list: Vec<String> = consoles_str.lines().map(String::from).collect();
-
-    consoles_list
+pub fn list_consoles(sess: &ssh2::Session) -> Vec<String> {
+    do_ls(sess, None)
 }
 
 pub fn list_roms(sess: &ssh2::Session, console: &str) -> Vec<String> {
-    let remote_root_path =
-        dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
-    let console_path = format!("{}/{}", remote_root_path, console);
-
-    let mut channel = sess.channel_session().unwrap();
-
-    let cmd = format!("ls {}", console_path);
-    channel.exec(&cmd).unwrap();
-
-    let mut roms_str = String::new();
-    channel.read_to_string(&mut roms_str).unwrap();
-    channel.wait_close().unwrap();
-
-    let roms_list: Vec<String> = roms_str.lines().map(String::from).collect();
-
-    roms_list
+    do_ls(sess, Some(String::from(console)))
 }
