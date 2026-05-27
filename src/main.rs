@@ -1,6 +1,11 @@
 mod des_ssh;
+mod tui;
 
 fn main() {
+    tui::main().unwrap();
+}
+
+fn _do_ssh() {
     dotenv::dotenv().ok();
     let sess = des_ssh::create_ssh_session();
     let consoles = des_ssh::list_consoles(&sess);
