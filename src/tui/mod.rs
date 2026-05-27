@@ -9,6 +9,8 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
+use crate::des_ssh;
+
 #[derive(Debug, Default)]
 enum AppMode {
     #[default]
@@ -26,8 +28,9 @@ struct AppState {
     roms_list: Vec<String>,
     highlighted_console: ListState,
     highlighted_rom: ListState,
-    selected_roms: HashMap<String, String>,
+    selected_roms: HashMap<String, Vec<String>>,
     mode: AppMode,
+    current_console: String,
 }
 
 pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> color_eyre::Result<()> {
@@ -48,14 +51,51 @@ fn app(
         consoles_list,
         ..Default::default()
     };
+    app_state.highlighted_console.select_first();
     loop {
         terminal.draw(|frame| render(frame, &mut app_state))?;
 
         if let Some(key) = event::read()?.as_key_press_event() {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                KeyCode::Char('k') | KeyCode::Up => app_state.highlighted_console.select_previous(),
-                KeyCode::Char('j') | KeyCode::Down => app_state.highlighted_console.select_next(),
+                KeyCode::Char('k') | KeyCode::Up => match app_state.mode {
+                    AppMode::SelectConsole => app_state.highlighted_console.select_previous(),
+                    AppMode::SelectRom => app_state.highlighted_rom.select_previous(),
+                    AppMode::SelectSelection => {}
+                    _ => {}
+                },
+                KeyCode::Char('j') | KeyCode::Down => match app_state.mode {
+                    AppMode::SelectConsole => app_state.highlighted_console.select_next(),
+                    AppMode::SelectRom => app_state.highlighted_rom.select_next(),
+                    AppMode::SelectSelection => {}
+                    _ => {}
+                },
+                KeyCode::Char('l') | KeyCode::Enter => match app_state.mode {
+                    AppMode::SelectConsole => {
+                        app_state.mode = AppMode::SelectRom;
+                        let selected_index = app_state.highlighted_console.selected().unwrap();
+                        app_state.current_console = app_state.consoles_list[selected_index].clone();
+
+                        app_state.roms_list = des_ssh::list_roms(sess, &app_state.current_console);
+                        app_state.highlighted_rom.select_first();
+                    }
+                    AppMode::SelectSelection => {}
+                    _ => {}
+                },
+                KeyCode::Char('h') | KeyCode::Backspace => match app_state.mode {
+                    AppMode::SelectRom => {
+                        app_state.mode = AppMode::SelectConsole;
+                        app_state.current_console = String::new();
+                    }
+                    AppMode::SelectSelection => {}
+                    _ => {}
+                },
+                KeyCode::Char(' ') => match app_state.mode {
+                    AppMode::SelectRom => {
+                        todo!();
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -63,15 +103,6 @@ fn app(
 }
 
 fn render(frame: &mut Frame, app_state: &mut AppState) {
-    let roms = vec![
-        ListItem::new("Crash 1"),
-        ListItem::new("Spyro Dragon"),
-        ListItem::new("Skate game"),
-        ListItem::new("Disney Pixar's Action Game Featuring Hercules"),
-        ListItem::new("The Game"),
-        ListItem::new("something retro"),
-    ];
-
     let base_layout = Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
         .margin(1)
@@ -109,11 +140,18 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         ),
         outer_layout[1],
     );
-    frame.render_widget(
-        List::new(roms.clone())
+
+    let roms_block_console_title = if app_state.current_console.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", &app_state.current_console)
+    };
+    frame.render_stateful_widget(
+        List::new(app_state.roms_list.clone())
             .block(
                 Block::default()
                     .title_top(Line::from(" ROMS ").centered().bold())
+                    .title_top(Line::from(roms_block_console_title).left_aligned().italic())
                     .borders(Borders::ALL),
             )
             .bold()
@@ -121,5 +159,6 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
             .highlight_symbol("> ")
             .highlight_style(Style::default().fg(Color::White)),
         base_layout[1],
+        &mut app_state.highlighted_rom,
     );
 }
