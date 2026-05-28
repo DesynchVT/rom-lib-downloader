@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
-use crate::des_ssh;
+use crate::des_ssh::{self, ssh_download};
 
 #[derive(Debug, Default, Clone)]
 struct RomItem {
@@ -26,7 +26,6 @@ enum AppMode {
     SelectSelection,
     Downloading,
     Quitting,
-    Confirming,
 }
 
 struct AppState<'a> {
@@ -105,6 +104,10 @@ fn app(
     while app_state.mode != AppMode::Quitting {
         terminal.draw(|frame| render(frame, &mut app_state))?;
 
+        if app_state.mode == AppMode::Downloading {
+            continue;
+        }
+
         if let Some(key) = event::read()?.as_key_press_event() {
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => app_state.set_mode(AppMode::Quitting),
@@ -137,7 +140,8 @@ fn app(
                 KeyCode::Char(' ') => match app_state.mode {
                     AppMode::SelectRom => {
                         let rom_index = app_state.highlighted_rom.selected().unwrap();
-                        let selected_rom = app_state.roms_list.get(rom_index).unwrap().clone();
+                        let mut selected_rom = app_state.roms_list.get(rom_index).unwrap().clone();
+                        selected_rom.is_selected = true;
 
                         // Insert ROM into selection list
                         app_state.selected_roms.push(selected_rom);
@@ -147,6 +151,14 @@ fn app(
                     }
                     _ => {}
                 },
+                KeyCode::Char('d') => {
+                    app_state.set_mode(AppMode::Downloading);
+                    app_state.selected_roms.clone().into_iter().for_each(|rom| {
+                        ssh_download(sess, &rom.console, &rom.rom_title);
+                    });
+                    app_state.selected_roms = vec![];
+                    app_state.mode = AppMode::SelectConsole;
+                }
                 _ => {}
             }
         }
