@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::des_ssh;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct RomItem {
     rom_title: String,
     console: String,
@@ -35,7 +35,7 @@ struct AppState<'a> {
     roms_list: Vec<RomItem>,
     highlighted_console: ListState,
     highlighted_rom: ListState,
-    selected_roms: HashMap<String, Vec<RomItem>>,
+    selected_roms: Vec<RomItem>,
     mode: AppMode,
     current_console: String,
 }
@@ -48,7 +48,7 @@ impl<'a> AppState<'a> {
             roms_list: vec![],
             highlighted_console: ListState::default(),
             highlighted_rom: ListState::default(),
-            selected_roms: HashMap::default(),
+            selected_roms: vec![],
             mode: AppMode::SelectConsole,
             current_console: String::new(),
         }
@@ -127,7 +127,7 @@ fn app(
                 },
                 KeyCode::Char('h') | KeyCode::Backspace => match app_state.mode {
                     AppMode::SelectRom => {
-                        app_state.set_mode(AppMode::SelectConsole);
+                        app_state.mode = AppMode::SelectConsole;
                     }
                     AppMode::SelectSelection => {
                         app_state.set_mode(AppMode::SelectConsole);
@@ -136,7 +136,11 @@ fn app(
                 },
                 KeyCode::Char(' ') => match app_state.mode {
                     AppMode::SelectRom => {
-                        app_state.mode = AppMode::SelectConsole;
+                        let rom_index = app_state.highlighted_rom.selected().unwrap();
+                        let selected_rom = app_state.roms_list.get(rom_index).unwrap().clone();
+
+                        // Insert ROM into selection list
+                        app_state.selected_roms.push(selected_rom);
                     }
                     AppMode::SelectSelection => {
                         todo!();
@@ -162,6 +166,7 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         .constraints(vec![Constraint::Fill(2), Constraint::Fill(1)])
         .split(base_layout[0]);
 
+    // Consoles block
     frame.render_stateful_widget(
         List::new(app_state.consoles_list.clone())
             .block(
@@ -178,8 +183,17 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         &mut app_state.highlighted_console,
     );
 
+    // Selected ROMs block
     frame.render_widget(
-        Paragraph::new("None").block(
+        #[allow(clippy::all)]
+        List::from(
+            app_state
+                .selected_roms
+                .iter()
+                .map(|r| r.rom_title.clone())
+                .collect(),
+        )
+        .block(
             Block::new()
                 .title_top(Line::from(" SELECTED ROMS ").centered())
                 .bold()
@@ -189,6 +203,7 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         outer_layout[1],
     );
 
+    // ROMs block
     let roms_block_console_title = if app_state.current_console.is_empty() {
         String::new()
     } else {
