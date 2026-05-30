@@ -1,18 +1,16 @@
 use std::fs;
-use std::io::Read;
-use std::{collections::HashMap, io::Write};
+use std::io::{self, Read, Write};
 
-use color_eyre::eyre::Result;
 use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style, Stylize},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState},
 };
 
-use crate::des_ssh::{self, ssh_download};
+use crate::des_ssh;
 
 #[derive(Debug, Default, Clone)]
 struct RomItem {
@@ -27,7 +25,6 @@ enum AppMode {
     SelectRom,
     SelectSelection,
     Downloading,
-    Quitting,
 }
 
 struct AppState<'a> {
@@ -39,6 +36,7 @@ struct AppState<'a> {
     selected_roms: Vec<RomItem>,
     mode: AppMode,
     current_console: String,
+    exit: bool,
 }
 
 impl<'a> AppState<'a> {
@@ -52,6 +50,7 @@ impl<'a> AppState<'a> {
             selected_roms: vec![],
             mode: AppMode::SelectConsole,
             current_console: String::new(),
+            exit: false,
         }
     }
 
@@ -78,175 +77,174 @@ impl<'a> AppState<'a> {
                     .collect();
                 self.highlighted_rom.select_first();
             }
-            AppMode::Quitting => {
-                self.mode = AppMode::Quitting;
-            }
             _ => {}
         }
     }
+
+    fn handle_key_event(&mut self, key_event: KeyEvent) -> io::Result<()> {
+        if key_event.kind == KeyEventKind::Press {
+            // Global keybinds
+            match key_event.code {
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    self.exit = true;
+                    return Ok(());
+                }
+                KeyCode::Char('d') => {
+                    self.set_mode(AppMode::Downloading);
+                    self.selected_roms.clone().into_iter().for_each(|rom| {
+                        tui_download(self);
+                    });
+                    self.selected_roms = vec![];
+                    self.set_mode(AppMode::SelectConsole);
+                }
+                _ => {}
+            }
+            // Mode-specific keybinds
+            match self.mode {
+                AppMode::SelectConsole => self.handle_console_select_controls(key_event)?,
+                AppMode::SelectRom => self.handle_roms_select_controls(key_event)?,
+                AppMode::SelectSelection => self.handle_selection_select_controls(key_event)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_console_select_controls(&mut self, key_event: KeyEvent) -> io::Result<()> {
+        match key_event.code {
+            KeyCode::Char('k') | KeyCode::Up => self.highlighted_console.select_previous(),
+            KeyCode::Char('j') | KeyCode::Down => self.highlighted_console.select_next(),
+            KeyCode::Char('l') | KeyCode::Enter => self.set_mode(AppMode::SelectRom),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_roms_select_controls(&mut self, key_event: KeyEvent) -> io::Result<()> {
+        match key_event.code {
+            KeyCode::Char('k') | KeyCode::Up => self.highlighted_rom.select_previous(),
+            KeyCode::Char('j') | KeyCode::Down => self.highlighted_rom.select_next(),
+            KeyCode::Char('h') | KeyCode::Backspace => self.set_mode(AppMode::SelectConsole),
+            KeyCode::Char(' ') => {
+                let rom_index = self.highlighted_rom.selected().unwrap();
+                let mut selected_rom = self.roms_list.get(rom_index).unwrap().clone();
+                selected_rom.is_selected = true;
+
+                // Insert ROM into selection list
+                self.selected_roms.push(selected_rom);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_selection_select_controls(&mut self, key_event: KeyEvent) -> io::Result<()> {
+        Ok(())
+    }
 }
 
-pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> color_eyre::Result<()> {
-    color_eyre::install()?;
+pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> io::Result<()> {
+    let mut app_state = AppState::new(sess, consoles_list);
 
-    ratatui::run(|terminal| app(terminal, sess, consoles_list))?;
+    ratatui::run(|terminal| app(terminal, &mut app_state))?;
     ratatui::restore();
 
     Ok(())
 }
 
-fn app(
-    terminal: &mut DefaultTerminal,
-    sess: &ssh2::Session,
-    consoles_list: Vec<String>,
-) -> color_eyre::Result<()> {
-    let mut app_state = AppState::new(sess, consoles_list);
-
+fn app(terminal: &mut DefaultTerminal, app_state: &mut AppState) -> std::io::Result<()> {
     app_state.highlighted_console.select_first();
-    while app_state.mode != AppMode::Quitting {
-        terminal.draw(|frame| render(frame, &mut app_state))?;
 
-        if app_state.mode == AppMode::Downloading {
-            continue;
-        }
+    while !app_state.exit {
+        terminal.draw(|frame| render(frame, app_state))?;
 
-        if let Some(key) = event::read()?.as_key_press_event() {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => app_state.set_mode(AppMode::Quitting),
-                KeyCode::Char('k') | KeyCode::Up => match app_state.mode {
-                    AppMode::SelectConsole => app_state.highlighted_console.select_previous(),
-                    AppMode::SelectRom => app_state.highlighted_rom.select_previous(),
-                    AppMode::SelectSelection => {}
-                    _ => {}
-                },
-                KeyCode::Char('j') | KeyCode::Down => match app_state.mode {
-                    AppMode::SelectConsole => app_state.highlighted_console.select_next(),
-                    AppMode::SelectRom => app_state.highlighted_rom.select_next(),
-                    AppMode::SelectSelection => {}
-                    _ => {}
-                },
-                KeyCode::Char('l') | KeyCode::Enter => match app_state.mode {
-                    AppMode::SelectConsole => app_state.set_mode(AppMode::SelectRom),
-                    AppMode::SelectSelection => {}
-                    _ => {}
-                },
-                KeyCode::Char('h') | KeyCode::Backspace => match app_state.mode {
-                    AppMode::SelectRom => {
-                        app_state.mode = AppMode::SelectConsole;
-                    }
-                    AppMode::SelectSelection => {
-                        app_state.set_mode(AppMode::SelectConsole);
-                    }
-                    _ => {}
-                },
-                KeyCode::Char(' ') => match app_state.mode {
-                    AppMode::SelectRom => {
-                        let rom_index = app_state.highlighted_rom.selected().unwrap();
-                        let mut selected_rom = app_state.roms_list.get(rom_index).unwrap().clone();
-                        selected_rom.is_selected = true;
-
-                        // Insert ROM into selection list
-                        app_state.selected_roms.push(selected_rom);
-                    }
-                    AppMode::SelectSelection => {
-                        todo!();
-                    }
-                    _ => {}
-                },
-                KeyCode::Char('d') => {
-                    app_state.set_mode(AppMode::Downloading);
-                    app_state.selected_roms.clone().into_iter().for_each(|rom| {
-                        tui_download(sess, &app_state);
-                    });
-                    app_state.selected_roms = vec![];
-                    app_state.mode = AppMode::SelectConsole;
-                }
-                _ => {}
-            }
+        if let Some(key_event) = event::read()?.as_key_press_event() {
+            app_state.handle_key_event(key_event)?;
         }
     }
     Ok(())
 }
 
 fn render(frame: &mut Frame, app_state: &mut AppState) {
-    if app_state.mode != AppMode::Downloading {
-        let base_layout = Layout::default()
-            .direction(ratatui::layout::Direction::Horizontal)
-            .margin(1)
-            .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(frame.area());
+    let base_layout = Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .margin(1)
+        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)]);
 
-        let outer_layout = Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints(vec![Constraint::Fill(2), Constraint::Fill(1)])
-            .split(base_layout[0]);
+    let [base_left_layout, roms_area] = base_layout.areas(frame.area());
 
-        // Consoles block
-        frame.render_stateful_widget(
-            List::new(app_state.consoles_list.clone())
-                .block(
-                    Block::default()
-                        .title_top(Line::from(" CONSOLES ").centered().bold())
-                        .borders(Borders::ALL),
-                )
-                .bold()
-                .fg(Color::Blue)
-                .highlight_symbol("> ")
-                //    .highlight_style(Style::default().fg(Color::White)),
-                .highlight_style(Modifier::REVERSED),
-            outer_layout[0],
-            &mut app_state.highlighted_console,
-        );
+    let outer_layout = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints(vec![Constraint::Fill(2), Constraint::Fill(1)]);
 
-        // Selected ROMs block
-        frame.render_widget(
-            #[allow(clippy::all)]
-            List::from(
-                app_state
-                    .selected_roms
-                    .iter()
-                    .map(|r| r.rom_title.clone())
-                    .collect(),
-            )
-            .block(
-                Block::new()
-                    .title_top(Line::from(" SELECTED ROMS ").centered())
-                    .bold()
-                    .fg(Color::Green)
-                    .borders(Borders::ALL),
-            ),
-            outer_layout[1],
-        );
+    let [consoles_area, selection_area] = outer_layout.areas(base_left_layout);
 
-        // ROMs block
-        let roms_block_console_title = if app_state.current_console.is_empty() {
-            String::new()
-        } else {
-            format!(" {} ", &app_state.current_console)
-        };
-        let mut roms: Vec<ListItem> = vec![];
-        for rom in &app_state.roms_list {
-            roms.push(ListItem::from(rom.rom_title.clone()));
-        }
-        frame.render_stateful_widget(
-            List::new(roms)
-                .block(
-                    Block::default()
-                        .title_top(Line::from(" ROMS ").centered().bold())
-                        .title_top(Line::from(roms_block_console_title).left_aligned().italic())
-                        .borders(Borders::ALL),
-                )
-                .bold()
-                .fg(Color::Magenta)
-                .highlight_symbol("> ")
-                .highlight_style(Style::default().fg(Color::White)),
-            base_layout[1],
-            &mut app_state.highlighted_rom,
-        );
-    } else {
+    // Consoles block
+
+    let consoles_block = Block::default()
+        .title_top(Line::from(" CONSOLES ").centered().bold())
+        .borders(Borders::ALL);
+
+    let consoles_list = List::new(app_state.consoles_list.clone())
+        .block(consoles_block)
+        .bold()
+        .fg(Color::Blue)
+        .highlight_symbol("> ")
+        //    .highlight_style(Style::default().fg(Color::White)),
+        .highlight_style(Modifier::REVERSED);
+
+    frame.render_stateful_widget(
+        consoles_list,
+        consoles_area,
+        &mut app_state.highlighted_console,
+    );
+
+    // Selected ROMs block
+    let selected_roms_block = Block::new()
+        .title_top(Line::from(" SELECTED ROMS ").centered())
+        .bold()
+        .fg(Color::Green)
+        .borders(Borders::ALL);
+
+    #[allow(clippy::all)]
+    let selected_roms_list = List::from(
+        app_state
+            .selected_roms
+            .iter()
+            .map(|r| r.rom_title.clone())
+            .collect(),
+    )
+    .block(selected_roms_block);
+
+    frame.render_widget(selected_roms_list, selection_area);
+
+    // ROMs block
+    let mut roms: Vec<ListItem> = vec![];
+    for rom in &app_state.roms_list {
+        roms.push(ListItem::from(rom.rom_title.clone()));
     }
+
+    let roms_block_console_title = if app_state.current_console.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", &app_state.current_console)
+    };
+    let roms_block = Block::default()
+        .title_top(Line::from(" ROMS ").centered().bold())
+        .title_top(Line::from(roms_block_console_title).left_aligned().italic())
+        .borders(Borders::ALL);
+
+    let roms_list = List::new(roms)
+        .block(roms_block)
+        .bold()
+        .fg(Color::Magenta)
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().fg(Color::White));
+
+    frame.render_stateful_widget(roms_list, roms_area, &mut app_state.highlighted_rom);
 }
-fn tui_download(sess: &ssh2::Session, app_state: &AppState) {
+
+fn tui_download(app_state: &AppState) {
     let local_root_path =
         dotenv::var("LOCAL_ROM_ROOT_PATH").expect("LOCAL_ROM_ROOT_PATH not set in .env");
     let remote_root_path =
@@ -265,7 +263,8 @@ fn tui_download(sess: &ssh2::Session, app_state: &AppState) {
         let part_path = format!("{}/{}.part", temp_download_dir, rom);
 
         // Connect to the local SSH server
-        let (mut remote_file, stat) = sess
+        let (mut remote_file, stat) = app_state
+            .sess
             .scp_recv(std::path::Path::new(&remote_rom_path))
             .unwrap();
         println!("remote file size: {}", stat.size());
