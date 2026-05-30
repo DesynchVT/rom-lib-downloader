@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::path::Path;
 use zip::ZipArchive;
 
-fn unzip(zip_path: &str, dest_dir: &str) {
+pub fn unzip(zip_path: &str, dest_dir: &str) {
     let file = File::open(zip_path).unwrap();
     let mut archive = ZipArchive::new(file).unwrap();
     archive.extract(dest_dir).unwrap();
