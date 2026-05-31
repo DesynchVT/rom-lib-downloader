@@ -1,6 +1,5 @@
 use std::io::{self, Read, Write};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::mpsc::{self, Sender};
 use std::{fs, thread};
 
 use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
@@ -10,14 +9,18 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     symbols::border,
     text::Line,
-    widgets::{Block, Borders, Gauge, List, ListItem, ListState},
+    widgets::{
+        Block, Borders, Gauge, List, ListItem, ListState, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
 };
 
-use crate::des_ssh;
+use crate::des_ssh::{self, create_ssh_session};
 
 enum DesEvent {
     Input(crossterm::event::KeyEvent),
-    Progress(f64),
+    Progress { rom_title: String, percent: f64 },
+    DownloadComplete,
 }
 
 fn handle_input_events(tx: mpsc::Sender<DesEvent>) {
@@ -28,28 +31,15 @@ fn handle_input_events(tx: mpsc::Sender<DesEvent>) {
     }
 }
 
-fn handle_progress_events(tx: mpsc::Sender<DesEvent>) {
-    let mut progress: f64 = 0.0;
-    let increment = 0.01;
-    loop {
-        thread::sleep(Duration::from_millis(100));
-        progress += increment;
-        progress = progress.min(1.0);
-        tx.send(DesEvent::Progress(progress)).unwrap();
-        if progress == 1.0 {
-            break;
-        }
-    }
-}
-
 #[derive(Debug, Default, Clone)]
 struct RomItem {
     rom_title: String,
     console: String,
     is_selected: bool,
+    download_percent: f64,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 enum AppMode {
     SelectConsole,
     SelectRom,
@@ -67,11 +57,16 @@ struct AppState<'a> {
     mode: AppMode,
     current_console: String,
     exit: bool,
-    download_progress: f64,
+    event_tx: Sender<DesEvent>,
+    download_scroll: usize,
 }
 
 impl<'a> AppState<'a> {
-    fn new(sess: &'_ ssh2::Session, consoles_list: Vec<String>) -> AppState<'_> {
+    fn new(
+        sess: &'_ ssh2::Session,
+        consoles_list: Vec<String>,
+        event_tx: Sender<DesEvent>,
+    ) -> AppState<'_> {
         AppState {
             sess,
             consoles_list,
@@ -82,8 +77,84 @@ impl<'a> AppState<'a> {
             mode: AppMode::SelectConsole,
             current_console: String::new(),
             exit: false,
-            download_progress: 0.0,
+            event_tx,
+            download_scroll: 0,
         }
+    }
+
+    fn download(&mut self) {
+        self.set_mode(AppMode::Downloading);
+        let tx = self.event_tx.clone();
+        let roms = self.selected_roms.clone();
+
+        thread::spawn(move || {
+            let thread_sess = create_ssh_session();
+            let local_root_path =
+                dotenv::var("LOCAL_ROM_ROOT_PATH").expect("LOCAL_ROM_ROOT_PATH not set in .env");
+            let remote_root_path =
+                dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
+
+            for mut rom_item in roms {
+                let (rom, console) = (&rom_item.rom_title, &rom_item.console);
+
+                let rom_wo_extension = &rom[..rom.rfind('.').unwrap_or(rom.len())];
+                let dest_path = format!("{}/{}/{}", local_root_path, console, rom_wo_extension);
+
+                let rom_path = format!("/{}/{}", console, rom);
+                let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
+                let local_console_path = format!("{}/{}", local_root_path, console);
+                let temp_download_dir = format!("{}/.downloading", local_console_path);
+                let part_path = format!("{}/{}.part", temp_download_dir, rom);
+
+                // Connect to the local SSH server
+                let (mut remote_file, stat) = thread_sess
+                    .scp_recv(std::path::Path::new(&remote_rom_path))
+                    .unwrap();
+                // println!("remote file size: {}", stat.size());
+                let total = stat.size() as f64;
+                let mut received = 0u64;
+
+                // Show a progress bar while downloading
+                // Download the file via scp
+                let mut buf = vec![0u8; 8192];
+
+                // Open file before the loop, write chunks as they arrive, rename at the end
+                fs::create_dir_all(&temp_download_dir).unwrap();
+                let mut local_file = fs::File::create(&part_path).unwrap();
+                loop {
+                    let n = remote_file.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    local_file.write_all(&buf[..n]).unwrap();
+                    received += n as u64;
+                    let percent = received as f64 / total;
+                    rom_item.download_percent = percent;
+                    tx.send(DesEvent::Progress {
+                        rom_title: rom.clone(),
+                        percent,
+                    })
+                    .unwrap();
+                }
+                // Update the progress bar
+
+                let completed_download = format!("{}/{}", temp_download_dir, rom_wo_extension);
+
+                des_ssh::unzip(&part_path, &completed_download);
+                fs::rename(&completed_download, &dest_path).unwrap();
+
+                // Optional: delete the zip after extraction
+                fs::remove_file(&part_path).unwrap();
+                fs::remove_dir_all(temp_download_dir).unwrap();
+
+                // Close the channel and wait for the whole content to be transferred
+                remote_file.send_eof().unwrap();
+                remote_file.wait_eof().unwrap();
+                remote_file.close().unwrap();
+                remote_file.wait_close().unwrap();
+                tx.send(DesEvent::DownloadComplete).unwrap();
+            }
+        });
     }
 
     fn set_mode(&mut self, new_mode: AppMode) {
@@ -105,9 +176,13 @@ impl<'a> AppState<'a> {
                         rom_title: r.clone(),
                         console: self.current_console.clone(),
                         is_selected: false,
+                        download_percent: 0.0,
                     })
                     .collect();
                 self.highlighted_rom.select_first();
+            }
+            AppMode::Downloading => {
+                self.mode = AppMode::Downloading;
             }
             _ => {}
         }
@@ -123,11 +198,7 @@ impl<'a> AppState<'a> {
                 }
                 KeyCode::Char('d') => {
                     self.set_mode(AppMode::Downloading);
-                    self.selected_roms.clone().into_iter().for_each(|rom| {
-                        tui_download(self);
-                    });
-                    self.selected_roms = vec![];
-                    self.set_mode(AppMode::SelectConsole);
+                    self.download();
                 }
                 _ => {}
             }
@@ -136,7 +207,7 @@ impl<'a> AppState<'a> {
                 AppMode::SelectConsole => self.handle_console_select_controls(key_event)?,
                 AppMode::SelectRom => self.handle_roms_select_controls(key_event)?,
                 AppMode::SelectSelection => self.handle_selection_select_controls(key_event)?,
-                _ => {}
+                AppMode::Downloading => self.handle_download_controls(key_event)?,
             }
         }
         Ok(())
@@ -170,24 +241,32 @@ impl<'a> AppState<'a> {
         Ok(())
     }
 
-    fn handle_selection_select_controls(&mut self, key_event: KeyEvent) -> io::Result<()> {
+    fn handle_download_controls(&mut self, key_event: KeyEvent) -> io::Result<()> {
+        match key_event.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                let max = self.selected_roms.len().saturating_sub(1);
+                self.download_scroll = (self.download_scroll + 1).min(max);
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.download_scroll = self.download_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_selection_select_controls(&mut self, _key_event: KeyEvent) -> io::Result<()> {
         Ok(())
     }
 }
 
 pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> io::Result<()> {
-    let mut app_state = AppState::new(sess, consoles_list);
-
     let (event_tx, event_rx) = mpsc::channel::<DesEvent>();
+    let mut app_state = AppState::new(sess, consoles_list, event_tx);
 
-    let tx_to_input_events = event_tx.clone();
+    let tx_to_input_events = app_state.event_tx.clone();
     thread::spawn(move || {
         handle_input_events(tx_to_input_events);
-    });
-
-    let tx_to_download_progress_events = event_tx.clone();
-    thread::spawn(move || {
-        handle_progress_events(tx_to_download_progress_events);
     });
 
     ratatui::run(|terminal| app(terminal, &mut app_state, event_rx))?;
@@ -208,15 +287,32 @@ fn app(
 
         match rx.recv().unwrap() {
             DesEvent::Input(key_event) => app_state.handle_key_event(key_event)?,
-            DesEvent::Progress(progress) => app_state.download_progress = progress,
+            DesEvent::Progress { rom_title, percent } => {
+                if let Some(rom) = app_state
+                    .selected_roms
+                    .iter_mut()
+                    .find(|r| r.rom_title == rom_title)
+                {
+                    rom.download_percent = percent;
+                }
+            }
+            DesEvent::DownloadComplete => {
+                if !app_state
+                    .selected_roms
+                    .iter()
+                    .any(|r| r.download_percent < 1.0)
+                {
+                    app_state.selected_roms.clear();
+                    app_state.set_mode(AppMode::SelectConsole);
+                }
+            }
         }
     }
     Ok(())
 }
 
 fn render(frame: &mut Frame, app_state: &mut AppState) {
-    // if app_state.mode == AppMode::Downloading {
-    if true {
+    if app_state.mode == AppMode::Downloading {
         render_download_screen(frame, app_state);
     } else {
         render_main_screen(frame, app_state);
@@ -238,7 +334,6 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     let [consoles_area, selection_area] = outer_layout.areas(base_left_layout);
 
     // Consoles block
-
     let consoles_block = Block::default()
         .title_top(Line::from(" CONSOLES ").centered().bold())
         .borders(Borders::ALL);
@@ -303,92 +398,50 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
 }
 
 fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
-    let vertical_layout = Layout::vertical([Constraint::Percentage(100)]);
-    let [layout_area] = vertical_layout.areas(frame.area());
-    let line = Line::from("downloading");
-    let area = frame.area().centered(
-        Constraint::Length(line.width() as u16),
-        Constraint::Length(1),
-    );
-    frame.render_widget(line, area);
+    let bar_height = 3;
+    let total = app_state.selected_roms.len();
+    if total == 0 {
+        return;
+    }
+    let visible = (frame.area().height / bar_height) as usize;
+    let visible = visible.min(total);
+    let max_scroll = total.saturating_sub(visible);
+    app_state.download_scroll = app_state.download_scroll.min(max_scroll);
+    let scroll = app_state.download_scroll;
+    let layout =
+        Layout::vertical(vec![Constraint::Length(bar_height); visible]).split(frame.area());
 
-    let progress_bar_block = Block::bordered()
-        .title("Downloads")
-        .border_set(border::THICK);
-    let progress_bar = Gauge::default()
-        .gauge_style(Style::default().fg(Color::Green))
-        .label(format!(
-            "Download 1: {:.2}%",
-            app_state.download_progress * 100.0
-        ))
-        .ratio(app_state.download_progress)
-        .block(progress_bar_block);
+    for i in 0..visible {
+        let idx = scroll + i;
+        let rom_item = &app_state.selected_roms[idx];
+        let percent = rom_item.download_percent;
+        let bar = Gauge::default()
+            .gauge_style(Style::default().fg(Color::Green))
+            .label(format!("{:.0}%", percent * 100.0))
+            .ratio(percent)
+            .block(
+                Block::bordered()
+                    .title(rom_item.rom_title.clone())
+                    .border_set(border::THICK),
+            );
+        frame.render_widget(bar, layout[i]);
+    }
 
-    frame.render_widget(
-        progress_bar,
-        Rect {
-            x: layout_area.left(),
-            y: layout_area.top(),
-            width: layout_area.width,
-            height: 3,
-        },
-    );
-}
-
-fn tui_download(app_state: &AppState) {
-    let local_root_path =
-        dotenv::var("LOCAL_ROM_ROOT_PATH").expect("LOCAL_ROM_ROOT_PATH not set in .env");
-    let remote_root_path =
-        dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
-
-    for rom_item in &app_state.selected_roms {
-        let (rom, console) = (&rom_item.rom_title, &rom_item.console);
-
-        let rom_wo_extension = &rom[..rom.rfind('.').unwrap_or(rom.len())];
-        let dest_path = format!("{}/{}/{}", local_root_path, console, rom_wo_extension);
-
-        let rom_path = format!("/{}/{}", console, rom);
-        let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
-        let local_console_path = format!("{}/{}", local_root_path, console);
-        let temp_download_dir = format!("{}/.downloading", local_console_path);
-        let part_path = format!("{}/{}.part", temp_download_dir, rom);
-
-        // Connect to the local SSH server
-        let (mut remote_file, stat) = app_state
-            .sess
-            .scp_recv(std::path::Path::new(&remote_rom_path))
-            .unwrap();
-        println!("remote file size: {}", stat.size());
-
-        // Show a progress bar while downloading
-        // Download the file via scp
-        let mut buf = vec![0u8; 8192];
-
-        // Open file before the loop, write chunks as they arrive, rename at the end
-        fs::create_dir_all(&temp_download_dir).unwrap();
-        let mut local_file = fs::File::create(&part_path).unwrap();
-        loop {
-            let n = remote_file.read(&mut buf).unwrap();
-            if n == 0 {
-                break;
-            }
-            local_file.write_all(&buf[..n]).unwrap();
-        }
-        // Update the progress bar
-
-        let completed_download = format!("{}/{}", temp_download_dir, rom_wo_extension);
-
-        des_ssh::unzip(&part_path, &completed_download);
-        fs::rename(&completed_download, &dest_path).unwrap();
-
-        // Optional: delete the zip after extraction
-        fs::remove_file(&part_path).unwrap();
-        fs::remove_dir_all(temp_download_dir).unwrap();
-
-        // Close the channel and wait for the whole content to be transferred
-        remote_file.send_eof().unwrap();
-        remote_file.wait_eof().unwrap();
-        remote_file.close().unwrap();
-        remote_file.wait_close().unwrap();
+    // Optional scrollbar indicator
+    if total > visible {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        let scrollbar_area = Rect {
+            x: frame.area().right().saturating_sub(1),
+            y: frame.area().top(),
+            width: 1,
+            height: frame.area().height,
+        };
+        frame.render_stateful_widget(
+            scrollbar,
+            scrollbar_area,
+            &mut ScrollbarState::new(total).position(scroll),
+        );
     }
 }
