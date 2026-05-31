@@ -1,16 +1,46 @@
-use std::fs;
 use std::io::{self, Read, Write};
+use std::sync::mpsc;
+use std::time::Duration;
+use std::{fs, thread};
 
 use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
+    symbols::border,
     text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, Borders, Gauge, List, ListItem, ListState},
 };
 
 use crate::des_ssh;
+
+enum DesEvent {
+    Input(crossterm::event::KeyEvent),
+    Progress(f64),
+}
+
+fn handle_input_events(tx: mpsc::Sender<DesEvent>) {
+    loop {
+        if let Some(key_event) = event::read().unwrap().as_key_press_event() {
+            tx.send(DesEvent::Input(key_event)).unwrap();
+        }
+    }
+}
+
+fn handle_progress_events(tx: mpsc::Sender<DesEvent>) {
+    let mut progress: f64 = 0.0;
+    let increment = 0.01;
+    loop {
+        thread::sleep(Duration::from_millis(100));
+        progress += increment;
+        progress = progress.min(1.0);
+        tx.send(DesEvent::Progress(progress)).unwrap();
+        if progress == 1.0 {
+            break;
+        }
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 struct RomItem {
@@ -37,6 +67,7 @@ struct AppState<'a> {
     mode: AppMode,
     current_console: String,
     exit: bool,
+    download_progress: f64,
 }
 
 impl<'a> AppState<'a> {
@@ -51,6 +82,7 @@ impl<'a> AppState<'a> {
             mode: AppMode::SelectConsole,
             current_console: String::new(),
             exit: false,
+            download_progress: 0.0,
         }
     }
 
@@ -146,26 +178,52 @@ impl<'a> AppState<'a> {
 pub fn main(sess: &ssh2::Session, consoles_list: Vec<String>) -> io::Result<()> {
     let mut app_state = AppState::new(sess, consoles_list);
 
-    ratatui::run(|terminal| app(terminal, &mut app_state))?;
+    let (event_tx, event_rx) = mpsc::channel::<DesEvent>();
+
+    let tx_to_input_events = event_tx.clone();
+    thread::spawn(move || {
+        handle_input_events(tx_to_input_events);
+    });
+
+    let tx_to_download_progress_events = event_tx.clone();
+    thread::spawn(move || {
+        handle_progress_events(tx_to_download_progress_events);
+    });
+
+    ratatui::run(|terminal| app(terminal, &mut app_state, event_rx))?;
     ratatui::restore();
 
     Ok(())
 }
 
-fn app(terminal: &mut DefaultTerminal, app_state: &mut AppState) -> std::io::Result<()> {
+fn app(
+    terminal: &mut DefaultTerminal,
+    app_state: &mut AppState,
+    rx: mpsc::Receiver<DesEvent>,
+) -> std::io::Result<()> {
     app_state.highlighted_console.select_first();
 
     while !app_state.exit {
         terminal.draw(|frame| render(frame, app_state))?;
 
-        if let Some(key_event) = event::read()?.as_key_press_event() {
-            app_state.handle_key_event(key_event)?;
+        match rx.recv().unwrap() {
+            DesEvent::Input(key_event) => app_state.handle_key_event(key_event)?,
+            DesEvent::Progress(progress) => app_state.download_progress = progress,
         }
     }
     Ok(())
 }
 
 fn render(frame: &mut Frame, app_state: &mut AppState) {
+    // if app_state.mode == AppMode::Downloading {
+    if true {
+        render_download_screen(frame, app_state);
+    } else {
+        render_main_screen(frame, app_state);
+    }
+}
+
+fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     let base_layout = Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
         .margin(1)
@@ -242,6 +300,39 @@ fn render(frame: &mut Frame, app_state: &mut AppState) {
         .highlight_style(Style::default().fg(Color::White));
 
     frame.render_stateful_widget(roms_list, roms_area, &mut app_state.highlighted_rom);
+}
+
+fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
+    let vertical_layout = Layout::vertical([Constraint::Percentage(100)]);
+    let [layout_area] = vertical_layout.areas(frame.area());
+    let line = Line::from("downloading");
+    let area = frame.area().centered(
+        Constraint::Length(line.width() as u16),
+        Constraint::Length(1),
+    );
+    frame.render_widget(line, area);
+
+    let progress_bar_block = Block::bordered()
+        .title("Downloads")
+        .border_set(border::THICK);
+    let progress_bar = Gauge::default()
+        .gauge_style(Style::default().fg(Color::Green))
+        .label(format!(
+            "Download 1: {:.2}%",
+            app_state.download_progress * 100.0
+        ))
+        .ratio(app_state.download_progress)
+        .block(progress_bar_block);
+
+    frame.render_widget(
+        progress_bar,
+        Rect {
+            x: layout_area.left(),
+            y: layout_area.top(),
+            width: layout_area.width,
+            height: 3,
+        },
+    );
 }
 
 fn tui_download(app_state: &AppState) {
