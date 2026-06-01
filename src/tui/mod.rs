@@ -258,8 +258,25 @@ impl<'a> AppState<'a> {
                 let mut selected_rom = self.roms_list.get(rom_index).unwrap().clone();
                 selected_rom.is_selected = true;
 
+                let remote_root_path = dotenv::var("REMOTE_ROM_ROOT_PATH")
+                    .expect("REMOTE_ROM_ROOT_PATH not set in .env");
+                let rom_path = format!("/{}/{}", selected_rom.console, selected_rom.rom_title);
+                let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
+
+                let (_remote_file, stat) = self
+                    .sess
+                    .scp_recv(std::path::Path::new(&remote_rom_path))
+                    .unwrap();
+
                 // Insert ROM into selection list
-                self.selected_roms.push(RomDownload::from(selected_rom));
+                let new_rom_download = RomDownload {
+                    rom_title: selected_rom.rom_title,
+                    console: selected_rom.console,
+                    total_size: stat.size(),
+                    total_received: 0,
+                    download_percent: 0.0,
+                };
+                self.selected_roms.push(new_rom_download);
             }
             _ => {}
         }
@@ -380,8 +397,15 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     );
 
     // Selected ROMs block
+    let total_selected_size = app_state.selected_roms.iter().map(|r| r.total_size).sum();
     let selected_roms_block = Block::new()
-        .title_top(Line::from(" SELECTED ROMS ").centered())
+        .title_top(
+            Line::from(format!(
+                " SELECTED ROMS ({:.2}MB) ",
+                bytes_to_megabytes(total_selected_size)
+            ))
+            .centered(),
+        )
         .bold()
         .fg(Color::Green)
         .borders(Borders::ALL);
@@ -426,13 +450,13 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
 
 fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
     let bar_height = 3;
-    let total = app_state.selected_roms.len();
-    if total == 0 {
+    let num_roms_selected = app_state.selected_roms.len();
+    if num_roms_selected == 0 {
         return;
     }
     let visible = (frame.area().height / bar_height) as usize;
-    let visible = visible.min(total);
-    let max_scroll = total.saturating_sub(visible);
+    let visible = visible.min(num_roms_selected);
+    let max_scroll = num_roms_selected.saturating_sub(visible);
     app_state.download_scroll = app_state.download_scroll.min(max_scroll);
     let scroll = app_state.download_scroll;
     let layout =
@@ -448,9 +472,14 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
             bytes_to_megabytes(rom_download.total_received),
             bytes_to_megabytes(rom_download.total_size)
         );
+        let bar_color = if percent >= 1.0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        };
         let bar = Gauge::default()
-            .gauge_style(Style::default().fg(Color::Green))
-            .label(bar_label)
+            .gauge_style(Style::default().fg(bar_color))
+            .label(bar_label.fg(Color::White).bold())
             .ratio(percent)
             .block(
                 Block::bordered()
@@ -461,7 +490,7 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
     }
 
     // Optional scrollbar indicator
-    if total > visible {
+    if num_roms_selected > visible {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
@@ -474,7 +503,7 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
         frame.render_stateful_widget(
             scrollbar,
             scrollbar_area,
-            &mut ScrollbarState::new(total).position(scroll),
+            &mut ScrollbarState::new(num_roms_selected).position(scroll),
         );
     }
 }
