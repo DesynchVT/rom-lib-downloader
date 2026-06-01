@@ -19,7 +19,7 @@ use crate::des_ssh::{self, create_ssh_session};
 
 enum DesEvent {
     Input(crossterm::event::KeyEvent),
-    Progress { rom_title: String, percent: f64 },
+    Progress(RomDownload),
     DownloadComplete,
 }
 
@@ -39,6 +39,27 @@ struct RomItem {
     download_percent: f64,
 }
 
+#[derive(Clone)]
+struct RomDownload {
+    console: String,
+    rom_title: String,
+    download_percent: f64,
+    total_size: u64,
+    total_received: u64,
+}
+
+impl RomDownload {
+    fn from(rom_item: RomItem) -> Self {
+        RomDownload {
+            console: rom_item.console,
+            rom_title: rom_item.rom_title,
+            download_percent: 0.0,
+            total_size: 0,
+            total_received: 0,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 enum AppMode {
     SelectConsole,
@@ -53,7 +74,7 @@ struct AppState<'a> {
     roms_list: Vec<RomItem>,
     highlighted_console: ListState,
     highlighted_rom: ListState,
-    selected_roms: Vec<RomItem>,
+    selected_roms: Vec<RomDownload>,
     mode: AppMode,
     current_console: String,
     exit: bool,
@@ -112,11 +133,11 @@ impl<'a> AppState<'a> {
                     .unwrap();
                 // println!("remote file size: {}", stat.size());
                 let total = stat.size() as f64;
-                let mut received = 0u64;
+                let mut received: u64 = 0;
 
                 // Show a progress bar while downloading
                 // Download the file via scp
-                let mut buf = vec![0u8; 8192];
+                let mut buf: Vec<u8> = vec![0; 8192];
 
                 // Open file before the loop, write chunks as they arrive, rename at the end
                 fs::create_dir_all(&temp_download_dir).unwrap();
@@ -130,11 +151,15 @@ impl<'a> AppState<'a> {
                     received += n as u64;
                     let percent = received as f64 / total;
                     rom_item.download_percent = percent;
-                    tx.send(DesEvent::Progress {
+                    let rom_download = RomDownload {
+                        console: console.clone(),
                         rom_title: rom.clone(),
-                        percent,
-                    })
-                    .unwrap();
+                        download_percent: percent,
+                        total_size: total as u64,
+                        total_received: received,
+                    };
+
+                    tx.send(DesEvent::Progress(rom_download)).unwrap();
                 }
                 // Update the progress bar
 
@@ -234,7 +259,7 @@ impl<'a> AppState<'a> {
                 selected_rom.is_selected = true;
 
                 // Insert ROM into selection list
-                self.selected_roms.push(selected_rom);
+                self.selected_roms.push(RomDownload::from(selected_rom));
             }
             _ => {}
         }
@@ -287,13 +312,15 @@ fn app(
 
         match rx.recv().unwrap() {
             DesEvent::Input(key_event) => app_state.handle_key_event(key_event)?,
-            DesEvent::Progress { rom_title, percent } => {
+            DesEvent::Progress(rom_download) => {
                 if let Some(rom) = app_state
                     .selected_roms
                     .iter_mut()
-                    .find(|r| r.rom_title == rom_title)
+                    .find(|r| r.rom_title == rom_download.rom_title)
                 {
-                    rom.download_percent = percent;
+                    rom.download_percent = rom_download.download_percent;
+                    rom.total_size = rom_download.total_size;
+                    rom.total_received = rom_download.total_received;
                 }
             }
             DesEvent::DownloadComplete => {
@@ -413,15 +440,21 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
 
     for i in 0..visible {
         let idx = scroll + i;
-        let rom_item = &app_state.selected_roms[idx];
-        let percent = rom_item.download_percent;
+        let rom_download = &app_state.selected_roms[idx];
+        let percent = rom_download.download_percent;
+        let bar_label = format!(
+            "{:.2}% ({:.2}MB / {:.2}MB)",
+            percent * 100.0,
+            bytes_to_megabytes(rom_download.total_received),
+            bytes_to_megabytes(rom_download.total_size)
+        );
         let bar = Gauge::default()
             .gauge_style(Style::default().fg(Color::Green))
-            .label(format!("{:.0}%", percent * 100.0))
+            .label(bar_label)
             .ratio(percent)
             .block(
                 Block::bordered()
-                    .title(rom_item.rom_title.clone())
+                    .title(rom_download.rom_title.clone())
                     .border_set(border::THICK),
             );
         frame.render_widget(bar, layout[i]);
@@ -444,4 +477,8 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
             &mut ScrollbarState::new(total).position(scroll),
         );
     }
+}
+
+fn bytes_to_megabytes(bytes: u64) -> f64 {
+    bytes as f64 / 1_048_576.0
 }
