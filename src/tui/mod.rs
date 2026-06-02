@@ -405,13 +405,20 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
         .title_top(Line::from(" CONSOLES ").centered().bold())
         .borders(Borders::ALL);
 
-    let consoles_list = List::new(app_state.consoles_list.clone())
-        .block(consoles_block)
-        .bold()
-        .fg(Color::Blue)
-        .highlight_symbol("> ")
-        //    .highlight_style(Style::default().fg(Color::White)),
-        .highlight_style(Modifier::REVERSED);
+    let consoles_list = if app_state.mode == AppMode::SelectConsole {
+        List::new(app_state.consoles_list.clone())
+            .block(consoles_block)
+            .bold()
+            .fg(Color::Blue)
+            .highlight_symbol("> ")
+            .highlight_style(Modifier::REVERSED)
+    } else {
+        List::new(app_state.consoles_list.clone())
+            .block(consoles_block)
+            .bold()
+            .fg(Color::Blue)
+            .highlight_symbol("> ")
+    };
 
     frame.render_stateful_widget(
         consoles_list,
@@ -467,11 +474,18 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
         .fg(Color::Magenta)
         .borders(Borders::ALL);
 
-    let roms_list = List::new(roms)
-        .block(roms_block)
-        .bold()
-        .highlight_symbol("> ")
-        .highlight_style(Modifier::REVERSED);
+    let roms_list = if app_state.mode == AppMode::SelectRom {
+        List::new(roms)
+            .block(roms_block)
+            .bold()
+            .highlight_symbol("> ")
+            .highlight_style(Modifier::REVERSED)
+    } else {
+        List::new(roms)
+            .block(roms_block)
+            .bold()
+            .highlight_symbol("> ")
+    };
 
     frame.render_stateful_widget(roms_list, roms_area, &mut app_state.highlighted_rom);
 }
