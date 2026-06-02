@@ -103,6 +103,51 @@ impl<'a> AppState<'a> {
         }
     }
 
+    fn is_selected_rom(&self, rom_title: &str, console: &str) -> bool {
+        self.selected_roms
+            .iter()
+            .any(|r| r.console == console && r.rom_title == rom_title)
+    }
+
+    fn toggle_rom_selected(&mut self) {
+        let rom_index = self.highlighted_rom.selected().unwrap();
+        if self.roms_list[rom_index].is_selected {
+            // Unselect
+            let rom_title = &self.roms_list[rom_index].rom_title;
+            let console = &self.roms_list[rom_index].console;
+            if let Some(selected_rom_index) = self.selected_roms.iter().position(|r| {
+                r.rom_title == rom_title.to_string() && r.console == console.to_string()
+            }) {
+                self.selected_roms.remove(selected_rom_index);
+            }
+            self.roms_list[rom_index].is_selected = false;
+            return;
+        }
+        // Select
+        self.roms_list[rom_index].is_selected = true;
+        let rom_item = self.roms_list[rom_index].clone();
+
+        let remote_root_path =
+            dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
+        let rom_path = format!("/{}/{}", rom_item.console, rom_item.rom_title);
+        let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
+
+        let (_remote_file, stat) = self
+            .sess
+            .scp_recv(std::path::Path::new(&remote_rom_path))
+            .unwrap();
+
+        // Insert ROM into selection list
+        let new_rom_download = RomDownload {
+            rom_title: rom_item.rom_title.to_owned(),
+            console: rom_item.console.to_owned(),
+            total_size: stat.size(),
+            total_received: 0,
+            download_percent: 0.0,
+        };
+        self.selected_roms.push(new_rom_download);
+    }
+
     fn download(&mut self) {
         self.set_mode(AppMode::Downloading);
         let tx = self.event_tx.clone();
@@ -200,7 +245,7 @@ impl<'a> AppState<'a> {
                     .map(|r| RomItem {
                         rom_title: r.clone(),
                         console: self.current_console.clone(),
-                        is_selected: false,
+                        is_selected: self.is_selected_rom(r, &self.current_console),
                         download_percent: 0.0,
                     })
                     .collect();
@@ -254,29 +299,7 @@ impl<'a> AppState<'a> {
             KeyCode::Char('j') | KeyCode::Down => self.highlighted_rom.select_next(),
             KeyCode::Char('h') | KeyCode::Backspace => self.set_mode(AppMode::SelectConsole),
             KeyCode::Char(' ') => {
-                let rom_index = self.highlighted_rom.selected().unwrap();
-                let mut selected_rom = self.roms_list.get(rom_index).unwrap().clone();
-                selected_rom.is_selected = true;
-
-                let remote_root_path = dotenv::var("REMOTE_ROM_ROOT_PATH")
-                    .expect("REMOTE_ROM_ROOT_PATH not set in .env");
-                let rom_path = format!("/{}/{}", selected_rom.console, selected_rom.rom_title);
-                let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
-
-                let (_remote_file, stat) = self
-                    .sess
-                    .scp_recv(std::path::Path::new(&remote_rom_path))
-                    .unwrap();
-
-                // Insert ROM into selection list
-                let new_rom_download = RomDownload {
-                    rom_title: selected_rom.rom_title,
-                    console: selected_rom.console,
-                    total_size: stat.size(),
-                    total_received: 0,
-                    download_percent: 0.0,
-                };
-                self.selected_roms.push(new_rom_download);
+                self.toggle_rom_selected();
             }
             _ => {}
         }
@@ -415,7 +438,7 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
         app_state
             .selected_roms
             .iter()
-            .map(|r| r.rom_title.clone())
+            .map(|r| format!("{}/{}", r.console.clone(), r.rom_title.clone()))
             .collect(),
     )
     .block(selected_roms_block);
@@ -425,7 +448,12 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     // ROMs block
     let mut roms: Vec<ListItem> = vec![];
     for rom in &app_state.roms_list {
-        roms.push(ListItem::from(rom.rom_title.clone()));
+        let color = if rom.is_selected {
+            Color::Green
+        } else {
+            Color::Magenta
+        };
+        roms.push(ListItem::new(rom.rom_title.clone()).style(Style::default().fg(color)));
     }
 
     let roms_block_console_title = if app_state.current_console.is_empty() {
@@ -436,14 +464,14 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     let roms_block = Block::default()
         .title_top(Line::from(" ROMS ").centered().bold())
         .title_top(Line::from(roms_block_console_title).left_aligned().italic())
+        .fg(Color::Magenta)
         .borders(Borders::ALL);
 
     let roms_list = List::new(roms)
         .block(roms_block)
         .bold()
-        .fg(Color::Magenta)
         .highlight_symbol("> ")
-        .highlight_style(Style::default().fg(Color::White));
+        .highlight_style(Modifier::REVERSED);
 
     frame.render_stateful_widget(roms_list, roms_area, &mut app_state.highlighted_rom);
 }
