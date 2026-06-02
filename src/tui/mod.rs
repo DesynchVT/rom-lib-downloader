@@ -31,30 +31,52 @@ fn handle_input_events(tx: mpsc::Sender<DesEvent>) {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct BaseRom {
+    title: String,
+    console: String,
+}
+
+impl BaseRom {
+    fn new(title: String, console: String) -> BaseRom {
+        BaseRom { title, console }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct RomItem {
-    rom_title: String,
-    console: String,
+    rom: BaseRom,
     is_selected: bool,
-    download_percent: f64,
+}
+
+impl RomItem {
+    fn new(title: String, console: String, is_selected: Option<bool>) -> RomItem {
+        RomItem {
+            rom: BaseRom::new(title, console),
+            is_selected: is_selected.unwrap_or(false),
+        }
+    }
 }
 
 #[derive(Clone)]
 struct RomDownload {
-    console: String,
-    rom_title: String,
+    rom: BaseRom,
     download_percent: f64,
     total_size: u64,
     total_received: u64,
 }
 
 impl RomDownload {
-    fn from(rom_item: RomItem) -> Self {
+    fn new(
+        title: String,
+        console: String,
+        download_percent: Option<f64>,
+        total_size: Option<u64>,
+    ) -> RomDownload {
         RomDownload {
-            console: rom_item.console,
-            rom_title: rom_item.rom_title,
-            download_percent: 0.0,
-            total_size: 0,
+            rom: BaseRom::new(title, console),
+            download_percent: download_percent.unwrap_or(0.0),
+            total_size: total_size.unwrap_or(0),
             total_received: 0,
         }
     }
@@ -106,18 +128,20 @@ impl<'a> AppState<'a> {
     fn is_selected_rom(&self, rom_title: &str, console: &str) -> bool {
         self.selected_roms
             .iter()
-            .any(|r| r.console == console && r.rom_title == rom_title)
+            .any(|r| r.rom.console == console && r.rom.title == rom_title)
     }
 
     fn toggle_rom_selected(&mut self) {
         let rom_index = self.highlighted_rom.selected().unwrap();
         if self.roms_list[rom_index].is_selected {
             // Unselect
-            let rom_title = &self.roms_list[rom_index].rom_title;
-            let console = &self.roms_list[rom_index].console;
-            if let Some(selected_rom_index) = self.selected_roms.iter().position(|r| {
-                r.rom_title == rom_title.to_string() && r.console == console.to_string()
-            }) {
+            let rom_title = &self.roms_list[rom_index].rom.title;
+            let console = &self.roms_list[rom_index].rom.console;
+            if let Some(selected_rom_index) = self
+                .selected_roms
+                .iter()
+                .position(|r| r.rom.title == *rom_title && r.rom.console == *console)
+            {
                 self.selected_roms.remove(selected_rom_index);
             }
             self.roms_list[rom_index].is_selected = false;
@@ -129,7 +153,7 @@ impl<'a> AppState<'a> {
 
         let remote_root_path =
             dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
-        let rom_path = format!("/{}/{}", rom_item.console, rom_item.rom_title);
+        let rom_path = format!("/{}/{}", rom_item.rom.console, rom_item.rom.title);
         let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
 
         let (_remote_file, stat) = self
@@ -138,13 +162,12 @@ impl<'a> AppState<'a> {
             .unwrap();
 
         // Insert ROM into selection list
-        let new_rom_download = RomDownload {
-            rom_title: rom_item.rom_title.to_owned(),
-            console: rom_item.console.to_owned(),
-            total_size: stat.size(),
-            total_received: 0,
-            download_percent: 0.0,
-        };
+        let new_rom_download = RomDownload::new(
+            rom_item.rom.title.to_owned(),
+            rom_item.rom.console.to_owned(),
+            None,
+            Some(stat.size()),
+        );
         self.selected_roms.push(new_rom_download);
     }
 
@@ -161,7 +184,7 @@ impl<'a> AppState<'a> {
                 dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
 
             for mut rom_item in roms {
-                let (rom, console) = (&rom_item.rom_title, &rom_item.console);
+                let (rom, console) = (&rom_item.rom.title, &rom_item.rom.console);
 
                 let rom_wo_extension = &rom[..rom.rfind('.').unwrap_or(rom.len())];
                 let dest_path = format!("{}/{}/{}", local_root_path, console, rom_wo_extension);
@@ -197,8 +220,10 @@ impl<'a> AppState<'a> {
                     let percent = received as f64 / total;
                     rom_item.download_percent = percent;
                     let rom_download = RomDownload {
-                        console: console.clone(),
-                        rom_title: rom.clone(),
+                        rom: BaseRom {
+                            console: console.clone(),
+                            title: rom.clone(),
+                        },
                         download_percent: percent,
                         total_size: total as u64,
                         total_received: received,
@@ -242,11 +267,12 @@ impl<'a> AppState<'a> {
 
                 self.roms_list = existing_roms
                     .iter()
-                    .map(|r| RomItem {
-                        rom_title: r.clone(),
-                        console: self.current_console.clone(),
-                        is_selected: self.is_selected_rom(r, &self.current_console),
-                        download_percent: 0.0,
+                    .map(|r| {
+                        RomItem::new(
+                            r.clone(),
+                            self.current_console.clone(),
+                            Some(self.is_selected_rom(r, &self.current_console)),
+                        )
                     })
                     .collect();
                 self.highlighted_rom.select_first();
@@ -356,7 +382,7 @@ fn app(
                 if let Some(rom) = app_state
                     .selected_roms
                     .iter_mut()
-                    .find(|r| r.rom_title == rom_download.rom_title)
+                    .find(|r| r.rom.title == rom_download.rom.title)
                 {
                     rom.download_percent = rom_download.download_percent;
                     rom.total_size = rom_download.total_size;
@@ -445,7 +471,7 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
         app_state
             .selected_roms
             .iter()
-            .map(|r| format!("{}/{}", r.console.clone(), r.rom_title.clone()))
+            .map(|r| format!("{}/{}", r.rom.console.clone(), r.rom.title.clone()))
             .collect(),
     )
     .block(selected_roms_block);
@@ -460,7 +486,7 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
         } else {
             Color::Magenta
         };
-        roms.push(ListItem::new(rom.rom_title.clone()).style(Style::default().fg(color)));
+        roms.push(ListItem::new(rom.rom.title.clone()).style(Style::default().fg(color)));
     }
 
     let roms_block_console_title = if app_state.current_console.is_empty() {
@@ -525,7 +551,7 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
             .ratio(percent)
             .block(
                 Block::bordered()
-                    .title(rom_download.rom_title.clone())
+                    .title(rom_download.rom.title.clone())
                     .border_set(border::THICK),
             );
         frame.render_widget(bar, layout[i]);
