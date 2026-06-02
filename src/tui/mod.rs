@@ -176,8 +176,8 @@ impl<'a> AppState<'a> {
         let tx = self.event_tx.clone();
         let roms = self.selected_roms.clone();
 
+        let thread_sess = create_ssh_session();
         thread::spawn(move || {
-            let thread_sess = create_ssh_session();
             let local_root_path =
                 dotenv::var("LOCAL_ROM_ROOT_PATH").expect("LOCAL_ROM_ROOT_PATH not set in .env");
             let remote_root_path =
