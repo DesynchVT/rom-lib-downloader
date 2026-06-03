@@ -462,8 +462,8 @@ fn render_main_screen(frame: &mut Frame, app_state: &mut AppState) {
     let selected_roms_block = Block::new()
         .title_top(
             Line::from(format!(
-                " SELECTED ROMS ({:.2}MB) ",
-                bytes_to_megabytes(total_selected_size)
+                " SELECTED ROMS ({}) ",
+                bytes_to_human_readable(total_selected_size)
             ))
             .centered(),
         )
@@ -540,10 +540,10 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
         let rom_download = &app_state.selected_roms[idx];
         let percent = rom_download.download_percent;
         let bar_label = format!(
-            "{:.2}% ({:.2}MB / {:.2}MB)",
+            "{:.2}% ({} / {})",
             percent * 100.0,
-            bytes_to_megabytes(rom_download.total_received),
-            bytes_to_megabytes(rom_download.total_size)
+            bytes_to_human_readable(rom_download.total_received),
+            bytes_to_human_readable(rom_download.total_size)
         );
         let bar_color = if percent >= 1.0 {
             Color::Green
@@ -581,6 +581,14 @@ fn render_download_screen(frame: &mut Frame, app_state: &mut AppState) {
     }
 }
 
-fn bytes_to_megabytes(bytes: u64) -> f64 {
-    bytes as f64 / 1_048_576.0
+fn bytes_to_human_readable(bytes: u64) -> String {
+    let bytes = bytes as f64;
+    let megabytes = bytes / 1_048_576.0;
+
+    if megabytes >= 1024.0 {
+        let gigabytes = bytes / 1_073_741_824.0;
+        format!("{:.2}GB", gigabytes)
+    } else {
+        format!("{:.2}MB", megabytes)
+    }
 }
