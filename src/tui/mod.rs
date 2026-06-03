@@ -183,7 +183,7 @@ impl<'a> AppState<'a> {
             let remote_root_path =
                 dotenv::var("REMOTE_ROM_ROOT_PATH").expect("REMOTE_ROM_ROOT_PATH not set in .env");
 
-            for mut rom_item in roms {
+            for rom_item in roms {
                 let (rom, console) = (&rom_item.rom.title, &rom_item.rom.console);
 
                 let rom_wo_extension = &rom[..rom.rfind('.').unwrap_or(rom.len())];
@@ -199,7 +199,6 @@ impl<'a> AppState<'a> {
                 let (mut remote_file, stat) = thread_sess
                     .scp_recv(std::path::Path::new(&remote_rom_path))
                     .unwrap();
-                // println!("remote file size: {}", stat.size());
                 let total = stat.size() as f64;
                 let mut received: u64 = 0;
 
@@ -210,6 +209,8 @@ impl<'a> AppState<'a> {
                 // Open file before the loop, write chunks as they arrive, rename at the end
                 fs::create_dir_all(&temp_download_dir).unwrap();
                 let mut local_file = fs::File::create(&part_path).unwrap();
+                let mut last_send = std::time::Instant::now();
+                const THROTTLE_MS: u128 = 33;
                 loop {
                     let n = remote_file.read(&mut buf).unwrap();
                     if n == 0 {
@@ -217,19 +218,23 @@ impl<'a> AppState<'a> {
                     }
                     local_file.write_all(&buf[..n]).unwrap();
                     received += n as u64;
-                    let percent = received as f64 / total;
-                    rom_item.download_percent = percent;
-                    let rom_download = RomDownload {
-                        rom: BaseRom {
-                            console: console.clone(),
-                            title: rom.clone(),
-                        },
-                        download_percent: percent,
-                        total_size: total as u64,
-                        total_received: received,
-                    };
-
-                    tx.send(DesEvent::Progress(rom_download)).unwrap();
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_send).as_millis() >= THROTTLE_MS
+                        || received >= stat.size()
+                    {
+                        last_send = now;
+                        let percent = received as f64 / total;
+                        tx.send(DesEvent::Progress(RomDownload {
+                            rom: BaseRom {
+                                console: console.clone(),
+                                title: rom.clone(),
+                            },
+                            download_percent: percent,
+                            total_size: total as u64,
+                            total_received: received,
+                        }))
+                        .unwrap();
+                    }
                 }
                 // Update the progress bar
 
