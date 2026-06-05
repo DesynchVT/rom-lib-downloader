@@ -17,7 +17,7 @@ pub fn create_ssh_session() -> ssh2::Session {
     let ssh_key_path = Path::new(&ssh_key);
 
     // Connect to the local SSH server
-    let tcp = TcpStream::connect(format!("{}:22", remote_hostname)).unwrap();
+    let tcp = TcpStream::connect(format!("{}@{}:22", username, remote_hostname)).unwrap();
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
