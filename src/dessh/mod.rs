@@ -5,19 +5,19 @@ use std::path::Path;
 
 pub fn create_ssh_session() -> ssh2::Session {
     // Check .env is in order
-    let remote_hostname = dotenv::var("REMOTE_HOSTNAME");
-    let remote_hostname = if let Ok(hostname) = remote_hostname {
+    let remote_hostname = if let Ok(hostname) = dotenv::var("REMOTE_HOSTNAME") {
         hostname
     } else {
         dotenv::var("REMOTE_IP_ADDRESS")
             .expect("REMOTE_HOSTNAME and REMOTE_IP_ADDRESS not set in .env")
     };
+
     let username = dotenv::var("REMOTE_USERNAME").expect("REMOTE_USERNAME not set in .env");
     let ssh_key = dotenv::var("SSH_KEY_PATH").expect("SSH_KEY_PATH not set in .env");
     let ssh_key_path = Path::new(&ssh_key);
 
     // Connect to the local SSH server
-    let tcp = TcpStream::connect(format!("{}@{}:22", username, remote_hostname)).unwrap();
+    let tcp = TcpStream::connect(format!("{}:22", remote_hostname)).unwrap();
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
     sess.handshake().unwrap();
