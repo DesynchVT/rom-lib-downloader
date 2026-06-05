@@ -179,7 +179,26 @@ impl<'a> AppState<'a> {
                 let (rom, console) = (&rom_item.rom.title, &rom_item.rom.console);
 
                 let rom_wo_extension = &rom[..rom.rfind('.').unwrap_or(rom.len())];
-                let dest_path = format!("{}/{}/{}", local_root_path, console, rom_wo_extension);
+                let dest_path = std::path::Path::new(&local_root_path)
+                    .join(console)
+                    .join(rom_wo_extension);
+
+                if let Ok(exists) = dest_path.try_exists()
+                    && exists
+                {
+                    // Skip existing roms
+                    tx.send(DesEvent::Progress(RomDownload {
+                        rom: BaseRom {
+                            console: console.clone(),
+                            title: rom.clone(),
+                        },
+                        download_percent: 1.0,
+                        total_size: 0,
+                        total_received: 0,
+                    }))
+                    .unwrap();
+                    continue;
+                }
 
                 let rom_path = format!("/{}/{}", console, rom);
                 let remote_rom_path = format!("{}/{}", remote_root_path, rom_path);
