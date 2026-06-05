@@ -1,8 +1,9 @@
-mod des_ssh;
-mod tui;
+mod dessh;
+mod destui;
+pub mod utils;
 
 fn main() {
-    let sess = des_ssh::create_ssh_session();
-    let consoles = des_ssh::list_consoles(&sess);
-    tui::main(&sess, consoles).unwrap();
+    let sess = dessh::create_ssh_session();
+    let consoles = dessh::list_consoles(&sess);
+    destui::main(&sess, consoles).unwrap();
 }

@@ -1,15 +1,7 @@
 use ssh2::Session;
-use std::fs::File;
 use std::io::prelude::*;
 use std::net::TcpStream;
 use std::path::Path;
-use zip::ZipArchive;
-
-pub fn unzip(zip_path: &str, dest_dir: &str) {
-    let file = File::open(zip_path).unwrap();
-    let mut archive = ZipArchive::new(file).unwrap();
-    archive.extract(dest_dir).unwrap();
-}
 
 pub fn create_ssh_session() -> ssh2::Session {
     // Check .env is in order
